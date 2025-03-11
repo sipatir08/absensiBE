@@ -31,6 +31,11 @@ func Register(w http.ResponseWriter, r *http.Request) {
     }
     user.Password = hashedPassword
 
+	// Set role default ke "employee"
+    if user.Role == "" {
+        user.Role = "employee"
+    }
+
     // Insert user into database
     query := `INSERT INTO users (name, email, password, role, created_at) 
               VALUES ($1, $2, $3, $4, $5) RETURNING id`

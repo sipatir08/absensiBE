@@ -21,6 +21,8 @@ func SetupRoutes(client *auth.Client) *mux.Router {
 	// Routes untuk check-in dan check-out yang hanya bisa diakses jika autentikasi berhasil
 	protected.HandleFunc("/check-in", controller.CheckIn).Methods("POST")
 	protected.HandleFunc("/check-out", controller.CheckOut).Methods("POST")
+	protected.HandleFunc("/attendance/monthly", controller.GetMonthlyAttendance).Methods("POST")
+
 
 	return r
 }
