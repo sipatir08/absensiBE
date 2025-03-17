@@ -52,7 +52,6 @@ if err != nil {
     json.NewEncoder(w).Encode(user)
 }
 
-
 // Login handles user login
 func Login(w http.ResponseWriter, r *http.Request) {
 	var user models.User

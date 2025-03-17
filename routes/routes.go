@@ -23,6 +23,7 @@ func SetupRoutes(client *auth.Client) *mux.Router {
 	protected.HandleFunc("/check-out", controller.CheckOut).Methods("POST")
 	protected.HandleFunc("/attendance/monthly", controller.GetMonthlyAttendance).Methods("POST")
 	protected.HandleFunc("/attendance/All-User", controller.GetAllUsersMonthlyAttendance).Methods("GET")
+	protected.HandleFunc("/attendance/logs", controller.GetAttendanceLogs).Methods("GET")
 
 
 	return r
