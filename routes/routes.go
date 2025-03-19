@@ -13,6 +13,9 @@ func SetupRoutes(client *auth.Client) *mux.Router {
 	// Routes untuk login dan register
 	r.HandleFunc("/register", controller.Register).Methods("POST")
 	r.HandleFunc("/login", controller.Login).Methods("POST")
+	r.HandleFunc("/getUsers", controller.GetUsers).Methods("GET")
+	r.HandleFunc("/updateUserRole/{id}", controller.UpdateUserRole).Methods("PUT")
+	r.HandleFunc("/delete/{id}", controller.DeleteUser).Methods("DELETE")
 
 	// Subrouter untuk endpoint yang memerlukan autentikasi JWT
 	protected := r.PathPrefix("/api/protected").Subrouter()
