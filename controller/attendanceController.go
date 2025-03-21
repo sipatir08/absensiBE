@@ -7,149 +7,144 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"time"
 
 	"absensi/database"
 	"absensi/models"
+	"absensi/utils"
 
-
+	"github.com/jackc/pgx/v5"
 )
 
 func CheckIn(w http.ResponseWriter, r *http.Request) {
-	var att models.Attendance
-
-	// Ambil data dari request body
-	err := json.NewDecoder(r.Body).Decode(&att)
-	if err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+	// Ambil user_id dari context dengan aman
+	userID, ok := r.Context().Value("user_id").(string)
+	if !ok || userID == "" {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
 		return
 	}
 
-	// Ambil UserID dari context
-	userID := r.Context().Value("user_id")
-	if userID == nil {
-		http.Error(w, "User ID is missing", http.StatusBadRequest)
-		return
+	// Parsing request body untuk mendapatkan latitude & longitude
+	var requestData struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
 	}
-	att.UserID = userID.(string)
 
-	// Lokasi kantor
-	officeLat := -6.876771186974438
-	officeLon := 107.57603549878579
-	maxDistance := 100.0 // dalam meter
-
-	// Hitung jarak user ke lokasi kantor
-	distance := HaversineDistance(att.Latitude, att.Longitude, officeLat, officeLon)
-
-	// Cek apakah dalam radius
-	if distance > maxDistance {
-		http.Error(w, "You are too far from the allowed location", http.StatusForbidden)
+	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
 		return
 	}
 
-	// Set check-in time
-	att.CheckIn = time.Now()
-
-	// Masukkan data ke attendance dan dapatkan ID
+	// Cek apakah ada attendance record untuk user
 	var attendanceID string
-	err = database.DB.QueryRow(context.Background(), `
-		INSERT INTO attendance (user_id, check_in, latitude, longitude, status) 
-		VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		att.UserID, att.CheckIn, att.Latitude, att.Longitude, att.Status,
+	err := database.DB.QueryRow(
+		r.Context(),
+		`SELECT id FROM attendance WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		userID,
 	).Scan(&attendanceID)
 
-	if err != nil {
-		log.Println("Database error while inserting attendance:", err)
-		http.Error(w, "Failed to record attendance", http.StatusInternalServerError)
+	// Jika tidak ada, buat attendance baru
+	if err == pgx.ErrNoRows {
+		query := `INSERT INTO attendance (user_id, created_at) VALUES ($1, NOW()) RETURNING id`
+		err = database.DB.QueryRow(r.Context(), query, userID).Scan(&attendanceID)
+		if err != nil {
+			log.Println("Error creating new attendance record:", err)
+			http.Error(w, "Failed to create attendance record", http.StatusInternalServerError)
+			return
+		}
+	} else if err != nil {
+		log.Println("Error fetching attendance ID:", err)
+		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	// Tambahkan log lokasi
-	_, err = database.DB.Exec(context.Background(), `
-		INSERT INTO attendance_logs (attendance_id, latitude, longitude) 
-		VALUES ($1, $2, $3)`, attendanceID, att.Latitude, att.Longitude)
-
+	// Simpan data check-in di attendance_logs
+	query := `INSERT INTO attendance_logs (attendance_id, latitude, longitude, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id`
+	_, err = database.DB.Exec(r.Context(), query, attendanceID, requestData.Latitude, requestData.Longitude)
 	if err != nil {
-		log.Println("Error inserting log:", err)
+		log.Println("Error inserting check-in:", err)
+		http.Error(w, "Failed to check-in", http.StatusInternalServerError)
+		return
 	}
 
-	log.Println("Check-in success")
-	json.NewEncoder(w).Encode(map[string]string{"message": "Check-in success"})
+	// Ambil email user untuk notifikasi
+	var email string
+	err = database.DB.QueryRow(r.Context(), "SELECT email FROM users WHERE id = $1", userID).Scan(&email)
+	if err != nil {
+		log.Println("Error fetching user email:", err)
+		http.Error(w, "Failed to retrieve user email", http.StatusInternalServerError)
+		return
+	}
+
+	// Kirim notifikasi email
+	err = utils.SendEmailNotification(email, "Check-in Berhasil", "Anda berhasil check-in hari ini!")
+	if err != nil {
+		log.Println("Error sending email:", err)
+		http.Error(w, "Failed to send email notification", http.StatusInternalServerError)
+		return
+	}
+
+	// Respon sukses
+	json.NewEncoder(w).Encode(map[string]string{"message": "Check-in berhasil dan email telah dikirim!"})
 }
 
 
 func CheckOut(w http.ResponseWriter, r *http.Request) {
-	var att models.Attendance
-
-	// Ambil UserID dari context
-	userID := r.Context().Value("user_id")
-	if userID == nil {
-		http.Error(w, "User ID is missing", http.StatusBadRequest)
-		return
-	}
-	att.UserID = userID.(string)
-
-	// Ambil lokasi dari request body
-	err := json.NewDecoder(r.Body).Decode(&att)
-	if err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+	// Ambil user_id dari context dengan aman
+	userID, ok := r.Context().Value("user_id").(string)
+	if !ok || userID == "" {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
 		return
 	}
 
-	// Lokasi kantor
-	officeLat := -6.876771186974438
-	officeLon := 107.57603549878579
-	maxDistance := 100.0
+	// Parsing request body untuk mendapatkan latitude & longitude
+	var requestData struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	}
 
-	// Hitung jarak lokasi user
-	distance := HaversineDistance(att.Latitude, att.Longitude, officeLat, officeLon)
-
-	// Jika terlalu jauh, tolak check-out
-	if distance > maxDistance {
-		http.Error(w, "You are too far from the allowed location", http.StatusForbidden)
+	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
 		return
 	}
 
-	// Ambil ID attendance yang masih aktif
+	// Ambil attendance_id berdasarkan user_id
 	var attendanceID string
-	err = database.DB.QueryRow(context.Background(), `
-		SELECT id FROM attendance 
-		WHERE user_id = $1 AND check_out IS NULL`, att.UserID).Scan(&attendanceID)
-
+	err := database.DB.QueryRow(r.Context(), `SELECT id FROM attendance WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, userID).Scan(&attendanceID)
 	if err != nil {
-		log.Println("Error fetching active attendance:", err)
-		http.Error(w, "No active check-in found", http.StatusBadRequest)
+		log.Println("Error fetching attendance ID:", err)
+		http.Error(w, "Attendance record not found", http.StatusNotFound)
 		return
 	}
 
-	// Set waktu check-out
-	att.CheckOut = time.Now()
-
-	// Update check-out di attendance
-	_, err = database.DB.Exec(context.Background(), `
-		UPDATE attendance 
-		SET check_out = $1 
-		WHERE id = $2`, att.CheckOut, attendanceID)
-
+	// Simpan data check-out di database
+	query := `INSERT INTO attendance_logs (attendance_id, latitude, longitude, created_at) VALUES ($1, $2, $3, NOW()) RETURNING id`
+	_, err = database.DB.Exec(r.Context(), query, attendanceID, requestData.Latitude, requestData.Longitude)
 	if err != nil {
-		log.Println("Database error while updating attendance:", err)
-		http.Error(w, "Failed to record check-out", http.StatusInternalServerError)
+		log.Println("Error inserting check-out:", err)
+		http.Error(w, "Failed to check-out", http.StatusInternalServerError)
 		return
 	}
 
-	// Tambahkan log lokasi
-	_, err = database.DB.Exec(context.Background(), `
-		INSERT INTO attendance_logs (attendance_id, latitude, longitude) 
-		VALUES ($1, $2, $3)`, attendanceID, att.Latitude, att.Longitude)
-
+	// Ambil email user dari database
+	var email string
+	err = database.DB.QueryRow(r.Context(), "SELECT email FROM users WHERE id = $1", userID).Scan(&email)
 	if err != nil {
-		log.Println("Error inserting log:", err)
+		log.Println("Error fetching user email:", err)
+		http.Error(w, "Failed to retrieve user email", http.StatusInternalServerError)
+		return
 	}
 
-	log.Println("Check-out success")
-	json.NewEncoder(w).Encode(map[string]string{"message": "Check-out success"})
+	// Kirim notifikasi email
+	err = utils.SendEmailNotification(email, "Check-out Berhasil", "Anda berhasil check-out hari ini!")
+	if err != nil {
+		log.Println("Error sending email:", err)
+		http.Error(w, "Failed to send email notification", http.StatusInternalServerError)
+		return
+	}
+
+	// Beri response sukses
+	json.NewEncoder(w).Encode(map[string]string{"message": "Check-out berhasil dan email telah dikirim!"})
 }
-
 
 // HaversineDistance menghitung jarak antara dua titik koordinat dalam meter
 func HaversineDistance(lat1, lon1, lat2, lon2 float64) float64 {
@@ -290,20 +285,14 @@ func GetAllUsersMonthlyAttendance(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetAttendanceLogs(w http.ResponseWriter, r *http.Request) {
-	// Ambil user_id dari context
-	userID := r.Context().Value("user_id")
-	if userID == nil {
+	// Ambil user_id dari context dengan aman
+	userID, ok := r.Context().Value("user_id").(string)
+	if !ok || userID == "" {
 		http.Error(w, "User ID is missing", http.StatusUnauthorized)
 		return
 	}
 
-	userIDStr, ok := userID.(string)
-	if !ok {
-		http.Error(w, "Invalid user ID format", http.StatusInternalServerError)
-		return
-	}
-
-	// Query untuk mengambil data log berdasarkan user_id
+	// Query untuk mengambil data check-in berdasarkan user_id
 	query := `
         SELECT al.id::TEXT, al.attendance_id, al.latitude, al.longitude, al.created_at
         FROM attendance_logs al
@@ -312,7 +301,7 @@ func GetAttendanceLogs(w http.ResponseWriter, r *http.Request) {
         ORDER BY al.created_at DESC
     `
 
-	rows, err := database.DB.Query(context.Background(), query, userIDStr)
+	rows, err := database.DB.Query(r.Context(), query, userID)
 	if err != nil {
 		log.Println("Failed to fetch logs:", err)
 		http.Error(w, "Failed to fetch logs", http.StatusInternalServerError)
@@ -324,26 +313,22 @@ func GetAttendanceLogs(w http.ResponseWriter, r *http.Request) {
 
 	for rows.Next() {
 		var logEntry models.AttendanceLog
-
-		// Karena `al.id::TEXT`, kita pakai string langsung
 		err := rows.Scan(&logEntry.ID, &logEntry.AttendanceID, &logEntry.Latitude, &logEntry.Longitude, &logEntry.CreatedAt)
 		if err != nil {
 			log.Println("Error scanning log data:", err)
 			http.Error(w, "Error scanning log data", http.StatusInternalServerError)
 			return
 		}
-
 		logs = append(logs, logEntry)
 	}
 
-	// Cek jika ada error saat iterasi rows
 	if err := rows.Err(); err != nil {
 		log.Println("Error iterating rows:", err)
 		http.Error(w, "Error processing logs", http.StatusInternalServerError)
 		return
 	}
 
-	// Set response header dan encode hasil ke JSON
+	// Kirim response JSON
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(logs); err != nil {
 		log.Println("Error encoding JSON response:", err)

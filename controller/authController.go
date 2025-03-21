@@ -23,7 +23,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Hash password before saving
+    // Hash password sebelum disimpan
     hashedPassword, err := utils.HashPassword(user.Password)
     if err != nil {
         http.Error(w, "Password hashing failed", http.StatusInternalServerError)
@@ -31,26 +31,42 @@ func Register(w http.ResponseWriter, r *http.Request) {
     }
     user.Password = hashedPassword
 
-	// Set role default ke "employee"
+    // Set role default ke "employee"
     if user.Role == "" {
         user.Role = "employee"
     }
 
-    // Insert user into database
+    // Insert user ke database dan dapatkan ID yang dihasilkan
+    var userID string
     query := `INSERT INTO users (name, email, password, role, created_at) 
               VALUES ($1, $2, $3, $4, $5) RETURNING id`
+    err = database.DB.QueryRow(context.Background(), query, user.Name, user.Email, user.Password, user.Role, time.Now()).Scan(&userID)
+    if err != nil {
+        log.Println("Database error:", err)
+        http.Error(w, "User registration failed", http.StatusInternalServerError)
+        return
+    }
 
-	   // Execute the query using Exec with context
-	   _, err = database.DB.Exec(context.Background(), query, user.Name, user.Email, user.Password, user.Role, time.Now())
-if err != nil {
-    log.Println("Database error:", err) // Menampilkan error dari database
-    http.Error(w, "User registration failed", http.StatusInternalServerError)
-    return
-}
+    // 🔥 Buat otomatis attendance setelah register
+    queryAttendance := `INSERT INTO attendance (user_id, check_in, check_out, latitude, longitude, status, created_at) 
+                    VALUES ($1, NULL, NULL, NULL, NULL, 'not checked-in', $2) RETURNING id`
+    var attendanceID string
+    err = database.DB.QueryRow(context.Background(), queryAttendance, userID, time.Now()).Scan(&attendanceID)
+    if err != nil {
+        log.Println("Failed to create attendance record:", err)
+        http.Error(w, "Failed to create attendance record", http.StatusInternalServerError)
+        return
+    }
 
+    // Kirim response sukses
     w.WriteHeader(http.StatusCreated)
-    json.NewEncoder(w).Encode(user)
+    json.NewEncoder(w).Encode(map[string]string{
+        "message":       "User registered successfully!",
+        "user_id":       userID,
+        "attendance_id": attendanceID,
+    })
 }
+
 
 // Login handles user login
 func Login(w http.ResponseWriter, r *http.Request) {
